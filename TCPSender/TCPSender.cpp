@@ -109,10 +109,10 @@ void comm_loop()
 			continue;
 		}
 		if (sock_reconnect) {
+			sock_reconnect = false;
 			log("Reconnecting");
 			closesocket(sock);
 			sock = _connect();
-			sock_reconnect = false;
 			continue;
 		}
 
