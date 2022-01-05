@@ -1,6 +1,3 @@
-// TODO
-// Button Connect/Disconnect instead of retry
-// Persistence
 #include "extension.h"
 #include "resource.h"
 
@@ -20,6 +17,7 @@
 
 using std::lock_guard;
 using std::mutex;
+using std::unique_lock;
 using std::string;
 using std::wstring;
 using std::wstring_convert;
@@ -32,17 +30,22 @@ using std::codecvt_utf8_utf16;
 #define MSG_Q_CAP 10
 #define CONFIG_APP_NAME L"TCPSend"
 #define CONFIG_ENTRY_REMOTE L"Remote"
+#define CONFIG_ENTRY_CONNECT L"WantConnect"
 #define CONFIG_FILE_NAME L"Textractor.ini"
 
 std::thread comm_thread;
+wstring remote = L"localhost:30501";
 std::atomic<bool> comm_thread_run;
-std::atomic<bool> sock_reconnect;
+
+std::atomic<bool> want_connect;
+mutex connect_mut;
+std::condition_variable connect_cv;
+
 std::deque<wstring> msg_q;
 mutex msg_q_mut;
 std::condition_variable msg_q_cv;
 
 SOCKET _connect();
-wstring remote = L"localhost:30501";
 bool _send(SOCKET &, string const &);
 
 wstring config_file_path;
@@ -69,7 +72,8 @@ wstring getEditBoxText(HWND hndl, int item) {
 	return tmp;
 }
 
-void log(string const& msg) {
+void log(string const& msg)
+{
 	if (hwnd == NULL)
 		return;
 
@@ -83,8 +87,51 @@ void log(string const& msg) {
 	SendMessage(GetDlgItem(hwnd, IDC_LOG), EM_LINESCROLL, 0, INT_MAX);
 }
 
+void log(wstring const& msg)
+{
+	string tmp =
+		wstring_convert<codecvt_utf8_utf16<wchar_t>>{}.to_bytes(msg);
+	log(tmp);
+}
+
+void write_config_val(LPCSTR key, LPCSTR val)
+{
+
+}
+
+void toggle_want_connect()
+{
+	unique_lock<mutex> conn_lk{connect_mut};
+
+	want_connect = !want_connect;
+
+	if (hwnd == NULL)
+		return;
+
+	HWND edit = GetDlgItem(hwnd, IDC_REMOTE);
+
+	if (want_connect) {
+		SetDlgItemText(hwnd, IDC_BTN_SUBMIT, L"Disconnect");
+		SendMessage(edit, EM_SETREADONLY, TRUE, NULL);
+	} else {
+		SetDlgItemText(hwnd, IDC_BTN_SUBMIT, L"Connect");
+		SendMessage(edit, EM_SETREADONLY, FALSE, NULL);
+	}
+
+	connect_cv.notify_one();
+
+	// We're not modifying the queue but the connection thread might currently
+	// be waiting on it so we need to notify it too
+	unique_lock<mutex> q_lk{msg_q_mut};
+	msg_q_cv.notify_one();
+}
+
 /**
  * Connect to remote and wait for messages in queue to send until comm_thread_run is false
+ * TODO The main loop uses 2 condition variables and pretty much 3 protected
+ * variables: the comm_thread_run, the queue, and connection wanted. The current
+ * approach should be thread safe but it is ugly and easy to break on changes
+ * in the loop. One condition variable for all three could work better.
  */
 void comm_loop()
 {
@@ -98,26 +145,40 @@ void comm_loop()
 		return;
 	}
 
-	SOCKET sock = _connect();
+	SOCKET sock = INVALID_SOCKET;
 
 	comm_thread_run = true;
 	while (comm_thread_run) {
+		// If we are not connected, try to connect if should, wait if we shouldn't
+		// If we are, but shouldn't, disconnect
+		unique_lock<mutex> conn_lk{connect_mut};
 		if (sock == INVALID_SOCKET) {
-			log("Connection failed. Retrying soon.");
-			std::this_thread::sleep_for(1000ms);
-			sock = _connect();
+			if (want_connect) {
+				conn_lk.unlock(); // Don't lock for connect
+				sock = _connect();
+				if (sock == INVALID_SOCKET) {
+					log("Connection failed. Retrying soon.");
+					conn_lk.lock();
+					connect_cv.wait_for(conn_lk, 1000ms);
+				} else {
+					log("Successfully connected");
+				}
+			} else {
+				connect_cv.wait(conn_lk);
+			}
 			continue;
-		}
-		if (sock_reconnect) {
-			sock_reconnect = false;
-			log("Reconnecting");
+		} if (!want_connect) {
+			log("Disconnecting");
 			closesocket(sock);
-			sock = _connect();
+			sock = INVALID_SOCKET;
 			continue;
 		}
+		conn_lk.unlock();
 
-		std::unique_lock<mutex> lk{msg_q_mut};
-		if (msg_q.empty()) {
+		unique_lock<mutex> lk{msg_q_mut};
+		if (!comm_thread_run) {
+			continue; // Need to check again as otherwise we could wait forever
+		} else if (msg_q.empty()) {
 			msg_q_cv.wait(lk);
 		} else {
 			// Remove first element, unlock, push back on error
@@ -147,7 +208,7 @@ void comm_loop()
 	WSACleanup();
 }
 
-BOOL CALLBACK DialogProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+INT_PTR CALLBACK DialogProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
 	switch (message)
 	{
@@ -163,26 +224,8 @@ BOOL CALLBACK DialogProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		case IDC_BTN_SUBMIT:
 		{
 			remote = getEditBoxText(hWnd, IDC_REMOTE);
-			sock_reconnect = true;
-			msg_q_cv.notify_one();
+			toggle_want_connect();
 
-			bool succ = WritePrivateProfileString(
-				CONFIG_APP_NAME, CONFIG_ENTRY_REMOTE, remote.c_str(), config_file_path.c_str());
-			if (!succ) {
-				LPVOID lpMsgBuf;
-				DWORD dw = GetLastError();
-				FormatMessage(
-					FORMAT_MESSAGE_ALLOCATE_BUFFER |
-					FORMAT_MESSAGE_FROM_SYSTEM |
-					FORMAT_MESSAGE_IGNORE_INSERTS,
-					NULL,
-					dw,
-					MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-					(LPTSTR)&lpMsgBuf,
-					0, NULL);
-				MessageBox(NULL, (LPCTSTR)lpMsgBuf, TEXT("Error"), MB_OK);
-				log("Error setting config");
-			}
 			break;
 		}
 		default:
@@ -203,9 +246,9 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved
 	{
 		wchar_t* buf;
 
-		// Get config
-		int buf_sz = (GetCurrentDirectory(0, NULL) + 1) * sizeof(wchar_t);
-		buf = (wchar_t*)GlobalAlloc(GPTR, buf_sz);
+		// Get config path
+		DWORD buf_sz = (GetCurrentDirectory(0, NULL) + 1) * sizeof(wchar_t);
+		buf = (wchar_t*)GlobalAlloc(GPTR, buf_sz + 4);
 		if (buf == NULL)
 			return false;
 
@@ -214,15 +257,21 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved
 		config_file_path = wstring{buf} + CONFIG_FILE_NAME;
 		GlobalFree(buf);
 
+		// Get configured remote
 		buf = (wchar_t*)GlobalAlloc(GPTR, 1000 * sizeof(wchar_t));
 		if (buf == NULL)
 			return false;
 
-		GetPrivateProfileString(
-			CONFIG_APP_NAME, CONFIG_ENTRY_REMOTE, remote.c_str(), buf, 1000, config_file_path.c_str());
-
+		GetPrivateProfileString(CONFIG_APP_NAME, CONFIG_ENTRY_REMOTE,
+			remote.c_str(), buf, 1000, config_file_path.c_str());
 		remote = wstring{buf};
+
 		GlobalFree(buf);
+
+		// Get configured connection state
+		UINT w = GetPrivateProfileInt(
+			CONFIG_APP_NAME, CONFIG_ENTRY_CONNECT,
+			want_connect, config_file_path.c_str());
 
 		// Create window
 		hwnd = CreateDialogParam(hModule, MAKEINTRESOURCE(IDD_DIALOG1),
@@ -233,19 +282,39 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved
 			return false;
 		}
 
+		if (w)
+			toggle_want_connect();
+
 		// Start communication thread
 		comm_thread = std::thread{comm_loop};
 	}
 	break;
 	case DLL_PROCESS_DETACH:
 	{
+		unique_lock<mutex> lk_conn{connect_mut};
+		unique_lock<mutex> lk_q{msg_q_mut};
+
 		comm_thread_run = false;
+
+		lk_conn.unlock();
+		lk_q.unlock();
+
+		connect_cv.notify_one();
 		msg_q_cv.notify_one();
+
 		if (comm_thread.joinable())
 			comm_thread.join();
 
 		if (hwnd != NULL)
 			CloseWindow(hwnd);
+
+		WritePrivateProfileString(
+			CONFIG_APP_NAME, CONFIG_ENTRY_CONNECT,
+			(want_connect ? L"1" : L"0"), config_file_path.c_str());
+
+		WritePrivateProfileString(
+			CONFIG_APP_NAME, CONFIG_ENTRY_REMOTE,
+			remote.c_str(), config_file_path.c_str());
 	}
 	break;
 	}
@@ -298,14 +367,14 @@ SOCKET _connect() {
 }
 
 bool _send(SOCKET &sock, string const &msg) {
-	size_t len = msg.length();
-	size_t buf_len = len + 4;
+	int len = (int) msg.length();
+	int buf_len = len + 4;
 	char* buf = new char[buf_len + 1];
 
 	strcpy_s(buf + 4, buf_len - 4 + 1, msg.c_str());
 	*((uint32_t*)buf) = len;
 
-	for (size_t sent = 0, ret = 0; sent < buf_len; sent += ret) {
+	for (int sent = 0, ret = 0; sent < buf_len; sent += ret) {
 		ret = send(sock, buf + sent, buf_len - sent, 0);
 		if (ret == SOCKET_ERROR) {
 			delete[] buf;
