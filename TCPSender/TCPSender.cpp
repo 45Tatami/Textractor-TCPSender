@@ -73,12 +73,17 @@ void log(string const& msg)
 	if (hwnd == NULL)
 		return;
 
-	wstring cur = getEditBoxText(hwnd, IDC_LOG);
-	if (cur.length() > 0)
-		cur += L"\r\n";
+	wstring tmp = getEditBoxText(hwnd, IDC_LOG);
+	if (tmp.length() > 0)
+		tmp.append(L"\r\n");
 
-	wstring tmp =
-		cur + wstring_convert<codecvt_utf8_utf16<wchar_t>>().from_bytes(msg);
+	// Remove older text to not slow down
+	if (tmp.length() > 4000) {
+		tmp.erase(0, 2000);
+	}
+
+	tmp.append(wstring_convert<codecvt_utf8_utf16<wchar_t>>().from_bytes(msg));
+
 	SetDlgItemText(hwnd, IDC_LOG, tmp.c_str());
 	SendMessage(GetDlgItem(hwnd, IDC_LOG), EM_LINESCROLL, 0, INT_MAX);
 }
