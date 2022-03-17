@@ -5,6 +5,8 @@
 #include <codecvt>
 #include <condition_variable>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <locale>
 #include <mutex>
 #include <string>
@@ -31,7 +33,7 @@ using std::codecvt_utf8_utf16;
 #define CONFIG_APP_NAME L"TCPSend"
 #define CONFIG_ENTRY_REMOTE L"Remote"
 #define CONFIG_ENTRY_CONNECT L"WantConnect"
-#define CONFIG_FILE_NAME L"Textractor.ini"
+#define CONFIG_FILE_NAME L"tcpsender.config"
 
 std::thread comm_thread;
 wstring remote = L"localhost:30501";
@@ -93,11 +95,6 @@ void log(wstring const& msg)
 	string tmp =
 		wstring_convert<codecvt_utf8_utf16<wchar_t>>{}.to_bytes(msg);
 	log(tmp);
-}
-
-void write_config_val(LPCSTR key, LPCSTR val)
-{
-
 }
 
 void toggle_want_connect()
@@ -232,6 +229,33 @@ INT_PTR CALLBACK DialogProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
 	}
 }
 
+void load_config(wstring const &filepath)
+{
+	log(wstring{L"Loading config: "} + filepath);
+	std::wifstream f{filepath};
+	if (f.fail()) {
+		log("Config file does not exist.");
+		return;
+	}
+
+	std::getline(f, remote);
+	SetDlgItemText(hwnd, IDC_REMOTE, remote.c_str());
+
+	bool connect;
+	f >> connect;
+	if (connect)
+		toggle_want_connect();
+}
+
+void save_config(wstring const& filepath, wstring const& remote, bool connect)
+{
+	std::wofstream f{filepath, std::ios_base::trunc};
+	if (f.good()) {
+		f << remote.c_str() << "\n";
+		f << connect;
+	}
+}
+
 BOOL WINAPI DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved)
 {
 	switch (ul_reason_for_call)
@@ -239,33 +263,6 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved
 	case DLL_PROCESS_ATTACH:
 	{
 		wchar_t* buf;
-
-		// Get config path
-		DWORD buf_sz = (GetCurrentDirectory(0, NULL) + 1) * sizeof(wchar_t);
-		buf = (wchar_t*)GlobalAlloc(GPTR, buf_sz + 4);
-		if (buf == NULL)
-			return false;
-
-		GetCurrentDirectory(buf_sz, buf);
-
-		config_file_path = wstring{buf} + CONFIG_FILE_NAME;
-		GlobalFree(buf);
-
-		// Get configured remote
-		buf = (wchar_t*)GlobalAlloc(GPTR, 1000 * sizeof(wchar_t));
-		if (buf == NULL)
-			return false;
-
-		GetPrivateProfileString(CONFIG_APP_NAME, CONFIG_ENTRY_REMOTE,
-			remote.c_str(), buf, 1000, config_file_path.c_str());
-		remote = wstring{buf};
-
-		GlobalFree(buf);
-
-		// Get configured connection state
-		UINT w = GetPrivateProfileInt(
-			CONFIG_APP_NAME, CONFIG_ENTRY_CONNECT,
-			want_connect, config_file_path.c_str());
 
 		// Create window
 		hwnd = CreateDialogParam(hModule, MAKEINTRESOURCE(IDD_DIALOG1),
@@ -276,8 +273,18 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved
 			return false;
 		}
 
-		if (w)
-			toggle_want_connect();
+		// Get config path
+		DWORD buf_sz = (GetCurrentDirectory(0, NULL) + 1) * sizeof(wchar_t);
+		buf = (wchar_t*)GlobalAlloc(GPTR, buf_sz + 4);
+		if (buf == NULL)
+			return false;
+
+		GetCurrentDirectory(buf_sz, buf);
+
+		config_file_path = std::filesystem::path{wstring{buf} + L"/" + CONFIG_FILE_NAME};
+		GlobalFree(buf);
+
+		load_config(config_file_path);
 
 		// Start communication thread
 		comm_thread = std::thread{comm_loop};
@@ -297,13 +304,7 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved
 		if (hwnd != NULL)
 			CloseWindow(hwnd);
 
-		WritePrivateProfileString(
-			CONFIG_APP_NAME, CONFIG_ENTRY_CONNECT,
-			(want_connect ? L"1" : L"0"), config_file_path.c_str());
-
-		WritePrivateProfileString(
-			CONFIG_APP_NAME, CONFIG_ENTRY_REMOTE,
-			remote.c_str(), config_file_path.c_str());
+		save_config(config_file_path, remote, want_connect);
 	}
 	break;
 	}
