@@ -10,7 +10,6 @@
 #include <locale>
 #include <mutex>
 #include <string>
-#include <thread>
 
 #include <windows.h>
 #include <winsock2.h>
@@ -35,26 +34,39 @@ using std::codecvt_utf8_utf16;
 #define CONFIG_ENTRY_CONNECT L"WantConnect"
 #define CONFIG_FILE_NAME L"tcpsender.config"
 
-std::thread comm_thread;
+HMODULE hmod = NULL;
+HWND win_hndl = NULL;
+
+UINT const WM_USR_LOG = WM_APP + 1;
+UINT const WM_USR_TOGGLE_CONNECT = WM_APP + 2;
+UINT const WM_USR_LOAD_CONFIG = WM_APP + 3;
+
+HANDLE comm_thread;
 wstring remote = L"localhost:30501";
 wstring config_file_path;
-HWND hwnd = NULL;
 
 // Mutex/cv protects following vars
 mutex conn_mut;
 std::condition_variable conn_cv;
 std::atomic<bool> comm_thread_run;
 std::atomic<bool> want_connect;
+std::atomic<bool> config_initialized;
 std::deque<wstring> msg_q;
 
 SOCKET _connect();
 bool _send(SOCKET &, string const &);
 
-wstring getEditBoxText(HWND hndl, int item) {
-	if (hwnd == NULL)
+wstring getEditBoxText(HWND win_hndl, int item) {
+	if (win_hndl == NULL)
 		return L"";
 
-	int len = GetWindowTextLength(GetDlgItem(hndl, item));
+	HWND edit = GetDlgItem(win_hndl, item);
+	if (edit == NULL) {
+		MessageBox(NULL, L"Could not get editbox handle", L"Error", 0);
+		return L"";
+	}
+
+	int len = GetWindowTextLength(edit);
 	if (len == 0)
 		return L"";
 
@@ -62,7 +74,7 @@ wstring getEditBoxText(HWND hndl, int item) {
 	if (buf == NULL)
 		return L"";
 
-	GetDlgItemText(hndl, item, buf, len + 1);
+	GetDlgItemText(win_hndl, item, buf, len + 1);
 
 	wstring tmp = wstring{ buf };
 	GlobalFree(buf);
@@ -72,22 +84,11 @@ wstring getEditBoxText(HWND hndl, int item) {
 
 void log(string const& msg)
 {
-	if (hwnd == NULL)
-		return;
-
-	wstring tmp = getEditBoxText(hwnd, IDC_LOG);
-	if (tmp.length() > 0)
-		tmp.append(L"\r\n");
-
-	// Remove older text to not slow down
-	if (tmp.length() > 4000) {
-		tmp.erase(0, 2000);
-	}
-
-	tmp.append(wstring_convert<codecvt_utf8_utf16<wchar_t>>().from_bytes(msg));
-
-	SetDlgItemText(hwnd, IDC_LOG, tmp.c_str());
-	SendMessage(GetDlgItem(hwnd, IDC_LOG), EM_LINESCROLL, 0, INT_MAX);
+	// Async to allow logging from dialog thread
+	// Freed on message handling
+	char* buf = (char *) GlobalAlloc(GPTR, msg.length() + 1);
+	msg.copy(buf, msg.length());
+	PostMessage(win_hndl, WM_USR_LOG, NULL, (LPARAM) buf);
 }
 
 void log(wstring const& msg)
@@ -99,31 +100,28 @@ void log(wstring const& msg)
 
 void toggle_want_connect()
 {
-	unique_lock<mutex> conn_lk{conn_mut};
+	PostMessage(win_hndl, WM_USR_TOGGLE_CONNECT, NULL, NULL);
+}
 
-	want_connect = !want_connect;
-
-	if (hwnd == NULL)
-		return;
-
-	HWND edit = GetDlgItem(hwnd, IDC_REMOTE);
-
-	if (want_connect) {
-		SetDlgItemText(hwnd, IDC_BTN_SUBMIT, L"Disconnect");
-		SendMessage(edit, EM_SETREADONLY, TRUE, NULL);
-	} else {
-		SetDlgItemText(hwnd, IDC_BTN_SUBMIT, L"Connect");
-		SendMessage(edit, EM_SETREADONLY, FALSE, NULL);
+void save_config(wstring const& filepath, wstring const& remote, bool connect)
+{
+	std::wofstream f{filepath, std::ios_base::trunc};
+	if (f.good()) {
+		f << remote.c_str() << "\n";
+		f << connect;
 	}
-
-	conn_cv.notify_one();
+	else {
+		MessageBox(NULL, L"Could not open config file for writing", L"Error", 0);
+	}
 }
 
 /**
  * Connect to remote and wait for messages in queue to send until comm_thread_run is false
  */
-void comm_loop()
+DWORD WINAPI comm_loop(LPVOID lpParam)
 {
+	(void)lpParam;
+
 	using namespace std::chrono_literals;
 	WSADATA wsaData;
 
@@ -131,7 +129,7 @@ void comm_loop()
 
 	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
 		log("Could not initialize WSA. Exit");
-		return;
+		return 1;
 	}
 
 	SOCKET sock = INVALID_SOCKET;
@@ -141,8 +139,12 @@ void comm_loop()
 	// again to see what happened and on long operations like connection
 	// attempts or sending data.
 	// This allows protecting muliple variables without performance problems.
-	comm_thread_run = true;
 	unique_lock<mutex> lk{conn_mut};
+
+	while (!config_initialized) {
+		conn_cv.wait(lk);
+	}
+
 	while (comm_thread_run) {
 		// If we are not connected, try to connect if wanted, wait if we don't
 		if (sock == INVALID_SOCKET) {
@@ -197,6 +199,8 @@ void comm_loop()
 
 	closesocket(sock);
 	WSACleanup();
+
+	return 0;
 }
 
 INT_PTR CALLBACK DialogProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -224,35 +228,75 @@ INT_PTR CALLBACK DialogProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
 		}
 		return true;
 	}
+	case WM_USR_LOG:
+	{
+		wstring tmp = getEditBoxText(hWnd, IDC_LOG);
+		if (tmp.length() > 0)
+			tmp.append(L"\r\n");
+
+		// Remove older text to not slow down
+		if (tmp.length() > 4000) {
+			tmp.erase(0, 2000);
+		}
+
+		char* buf = (char *) lParam;
+		tmp.append(wstring_convert<codecvt_utf8_utf16<wchar_t>>().from_bytes(buf));
+		GlobalFree(buf);
+
+		SetDlgItemText(hWnd, IDC_LOG, tmp.c_str());
+		SendMessage(GetDlgItem(hWnd, IDC_LOG), EM_LINESCROLL, 0, INT_MAX);
+		return true;
+	}
+	case WM_USR_TOGGLE_CONNECT:
+	{
+		lock_guard<mutex> conn_lk{ conn_mut };
+
+		want_connect = !want_connect;
+
+		HWND edit = GetDlgItem(hWnd, IDC_REMOTE);
+
+		if (want_connect) {
+			SetDlgItemText(hWnd, IDC_BTN_SUBMIT, L"Disconnect");
+			SendMessage(edit, EM_SETREADONLY, TRUE, NULL);
+		}
+		else {
+			SetDlgItemText(hWnd, IDC_BTN_SUBMIT, L"Connect");
+			SendMessage(edit, EM_SETREADONLY, FALSE, NULL);
+		}
+
+		save_config(config_file_path, remote, want_connect);
+
+		conn_cv.notify_one();
+		return true;
+	}
+	case WM_USR_LOAD_CONFIG:
+	{
+		lock_guard<mutex> conn_lk{ conn_mut };
+
+		log(L"Loading config: " + wstring{(wchar_t*) lParam});
+		std::wifstream f{(wchar_t *) lParam};
+		if (f.fail()) {
+			log("Config file does not exist.");
+			goto config_done;
+		}
+
+		std::getline(f, remote);
+		SetDlgItemText(win_hndl, IDC_REMOTE, remote.c_str());
+
+		bool connect;
+		f >> connect;
+		if (connect)
+			toggle_want_connect();
+
+config_done:
+		comm_thread_run = true;
+		config_initialized = true;
+		conn_cv.notify_one();
+
+		return true;
+	}
 	default:
 		return false;
-	}
-}
-
-void load_config(wstring const &filepath)
-{
-	log(wstring{L"Loading config: "} + filepath);
-	std::wifstream f{filepath};
-	if (f.fail()) {
-		log("Config file does not exist.");
-		return;
-	}
-
-	std::getline(f, remote);
-	SetDlgItemText(hwnd, IDC_REMOTE, remote.c_str());
-
-	bool connect;
-	f >> connect;
-	if (connect)
-		toggle_want_connect();
-}
-
-void save_config(wstring const& filepath, wstring const& remote, bool connect)
-{
-	std::wofstream f{filepath, std::ios_base::trunc};
-	if (f.good()) {
-		f << remote.c_str() << "\n";
-		f << connect;
 	}
 }
 
@@ -262,16 +306,22 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved
 	{
 	case DLL_PROCESS_ATTACH:
 	{
-		wchar_t* buf;
+		// We need to create the Window here since otherwise it will be owned
+		// by some worker thread
+		// But try to do as few things as possible
+		hmod = hModule;
 
 		// Create window
-		hwnd = CreateDialogParam(hModule, MAKEINTRESOURCE(IDD_DIALOG1),
-			FindWindow(NULL, L"Textractor"), DialogProc, 0);
+		win_hndl = CreateDialogParam(hmod, MAKEINTRESOURCE(IDD_DIALOG1),
+			NULL, DialogProc, 0);
 
-		if (hwnd == NULL) {
+		if (win_hndl == NULL) {
 			MessageBox(NULL, L"Could not open plugin dialog", L"Error", 0);
 			return false;
 		}
+		ShowWindow(win_hndl, SW_NORMAL);
+
+		wchar_t* buf;
 
 		// Get config path
 		DWORD buf_sz = (GetCurrentDirectory(0, NULL) + 1) * sizeof(wchar_t);
@@ -281,30 +331,30 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved
 
 		GetCurrentDirectory(buf_sz, buf);
 
-		config_file_path = std::filesystem::path{wstring{buf} + L"/" + CONFIG_FILE_NAME};
+		config_file_path = std::filesystem::path{wstring{buf}} / CONFIG_FILE_NAME;
 		GlobalFree(buf);
 
-		load_config(config_file_path);
+		PostMessage(win_hndl, WM_USR_LOAD_CONFIG,
+			NULL, (LPARAM) config_file_path.c_str());
 
 		// Start communication thread
-		comm_thread = std::thread{comm_loop};
+		comm_thread = CreateThread(NULL, 0, comm_loop, NULL, 0, NULL);
 	}
 	break;
 	case DLL_PROCESS_DETACH:
 	{
-		unique_lock<mutex> lk{conn_mut};
-		comm_thread_run = false;
-		lk.unlock();
+		// Signal and wait for cleanup of comm thread would be good but
+		// join/WaitForSingleObject does not work in DLL_PROCESS_DETACH
 
-		conn_cv.notify_one();
+		// unique_lock<mutex> lk{ conn_mut };
+		// comm_thread_run = false;
+		// conn_cv.notify_one();
+		// lk.unlock();
 
-		if (comm_thread.joinable())
-			comm_thread.join();
+		// if (comm_thread.joinable())
+		//	comm_thread.join();
 
-		if (hwnd != NULL)
-			CloseWindow(hwnd);
-
-		save_config(config_file_path, remote, want_connect);
+		DestroyWindow(win_hndl);
 	}
 	break;
 	}
@@ -385,6 +435,7 @@ bool ProcessSentence(wstring & sentence, SentenceInfo sentenceInfo)
 {
 	if (sentenceInfo["current select"]) {
 		log("Received sentence");
+
 		lock_guard<mutex> lock{conn_mut};
 
 		if (msg_q.size() >= MSG_Q_CAP)
