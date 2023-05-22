@@ -1,5 +1,5 @@
-#include "extension.h"
 #include "resource.h"
+#include "Extension.h"
 
 #include <atomic>
 #include <codecvt>
@@ -16,6 +16,7 @@
 #include <ws2tcpip.h>
 #include <strsafe.h>
 
+using std::filesystem::path;
 using std::lock_guard;
 using std::mutex;
 using std::unique_lock;
@@ -24,9 +25,11 @@ using std::wstring;
 using std::wstring_convert;
 using std::codecvt_utf8_utf16;
 
+#ifdef _MSC_VER
 #pragma comment (lib, "Ws2_32.lib")
 #pragma comment (lib, "Mswsock.lib")
 #pragma comment (lib, "AdvApi32.lib")
+#endif
 
 #define MSG_Q_CAP 10
 #define CONFIG_APP_NAME L"TCPSend"
@@ -88,7 +91,7 @@ void log(string const& msg)
 	// Freed on message handling
 	char* buf = (char *) GlobalAlloc(GPTR, msg.length() + 1);
 	msg.copy(buf, msg.length());
-	PostMessage(win_hndl, WM_USR_LOG, NULL, (LPARAM) buf);
+	PostMessage(win_hndl, WM_USR_LOG, (WPARAM) NULL, (LPARAM) buf);
 }
 
 void log(wstring const& msg)
@@ -100,10 +103,10 @@ void log(wstring const& msg)
 
 void toggle_want_connect()
 {
-	PostMessage(win_hndl, WM_USR_TOGGLE_CONNECT, NULL, NULL);
+	PostMessage(win_hndl, WM_USR_TOGGLE_CONNECT, (WPARAM) NULL, (LPARAM) NULL);
 }
 
-void save_config(wstring const& filepath, wstring const& remote, bool connect)
+void save_config(path const& filepath, wstring const& remote, bool connect)
 {
 	std::wofstream f{filepath, std::ios_base::trunc};
 	if (f.good()) {
@@ -257,11 +260,11 @@ INT_PTR CALLBACK DialogProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
 
 		if (want_connect) {
 			SetDlgItemText(hWnd, IDC_BTN_SUBMIT, L"Disconnect");
-			SendMessage(edit, EM_SETREADONLY, TRUE, NULL);
+			SendMessage(edit, EM_SETREADONLY, TRUE, (LPARAM) NULL);
 		}
 		else {
 			SetDlgItemText(hWnd, IDC_BTN_SUBMIT, L"Connect");
-			SendMessage(edit, EM_SETREADONLY, FALSE, NULL);
+			SendMessage(edit, EM_SETREADONLY, FALSE, (LPARAM) NULL);
 		}
 
 		save_config(config_file_path, remote, want_connect);
@@ -331,11 +334,11 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved
 
 		GetCurrentDirectory(buf_sz, buf);
 
-		config_file_path = std::filesystem::path{wstring{buf}} / CONFIG_FILE_NAME;
+		config_file_path = path{wstring{buf}} / CONFIG_FILE_NAME;
 		GlobalFree(buf);
 
 		PostMessage(win_hndl, WM_USR_LOAD_CONFIG,
-			NULL, (LPARAM) config_file_path.c_str());
+			(WPARAM) NULL, (LPARAM) config_file_path.c_str());
 
 		// Start communication thread
 		comm_thread = CreateThread(NULL, 0, comm_loop, NULL, 0, NULL);
