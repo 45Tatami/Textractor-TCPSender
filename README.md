@@ -29,3 +29,12 @@ meson setup --cross-file=cross/i686-w64-mingw32.txt build
 # x86_64/64bit
 meson setup --cross-file=cross/x86_64-w64-mingw32.txt build
 ```
+
+## Mock Application
+
+A simple application for loading the built dll and calling the usual entrypoint
+with some sample text can optionally be built and started via meson.
+
+    meson configure build -Dbuild_mock=enabled
+    ninja -Cbuild run_mock
+    # build/mock/mock_textractor.exe <path to dll>

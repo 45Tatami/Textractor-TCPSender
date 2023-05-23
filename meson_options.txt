@@ -1,0 +1,2 @@
+option('build_mock', type : 'feature', value : 'disabled',
+  description : 'build a mock application using this Textractor extension')
