@@ -7,6 +7,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <locale>
 #include <mutex>
 #include <string>
@@ -16,6 +17,8 @@
 #include <ws2tcpip.h>
 #include <strsafe.h>
 
+using std::cerr;
+using std::endl;
 using std::filesystem::path;
 using std::lock_guard;
 using std::mutex;
@@ -59,13 +62,24 @@ std::deque<wstring> msg_q;
 SOCKET _connect();
 bool _send(SOCKET &, string const &);
 
-wstring getEditBoxText(HWND win_hndl, int item) {
+/**
+ * try creating a message box, on failure write to stderr
+ */
+void tryMessageBox(HWND hWnd, LPCTSTR lpText, LPCTSTR lpCaption, UINT uType)
+{
+	if (0 == MessageBox(hWnd, lpText, lpCaption, uType)) {
+		cerr << "[TCPSender] err: unable to show message box; " << lpCaption << ": " << lpText << endl;
+	}
+}
+
+wstring getEditBoxText(HWND win_hndl, int item)
+{
 	if (win_hndl == NULL)
 		return L"";
 
 	HWND edit = GetDlgItem(win_hndl, item);
 	if (edit == NULL) {
-		MessageBox(NULL, L"Could not get editbox handle", L"Error", 0);
+		tryMessageBox(NULL, L"Could not get editbox handle", L"Error", 0);
 		return L"";
 	}
 
@@ -92,6 +106,8 @@ void log(string const& msg)
 	char* buf = (char *) GlobalAlloc(GPTR, msg.length() + 1);
 	msg.copy(buf, msg.length());
 	PostMessage(win_hndl, WM_USR_LOG, (WPARAM) NULL, (LPARAM) buf);
+
+	cerr << "[TCPSender] " << msg << endl;
 }
 
 void log(wstring const& msg)
@@ -114,7 +130,7 @@ void save_config(path const& filepath, wstring const& remote, bool connect)
 		f << connect;
 	}
 	else {
-		MessageBox(NULL, L"Could not open config file for writing", L"Error", 0);
+		tryMessageBox(NULL, L"Could not open config file for writing", L"Error", 0);
 	}
 }
 
@@ -303,7 +319,7 @@ config_done:
 	}
 }
 
-BOOL WINAPI DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved)
+BOOL WINAPI DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID)
 {
 	switch (ul_reason_for_call)
 	{
@@ -319,7 +335,7 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved
 			NULL, DialogProc, 0);
 
 		if (win_hndl == NULL) {
-			MessageBox(NULL, L"Could not open plugin dialog", L"Error", 0);
+			tryMessageBox(NULL, L"Could not open plugin dialog", L"Error", 0);
 			return false;
 		}
 		ShowWindow(win_hndl, SW_NORMAL);
@@ -437,7 +453,7 @@ bool _send(SOCKET &sock, string const &msg) {
 bool ProcessSentence(wstring & sentence, SentenceInfo sentenceInfo)
 {
 	if (sentenceInfo["current select"]) {
-		log("Received sentence");
+		log("received sentence");
 
 		lock_guard<mutex> lock{conn_mut};
 
