@@ -46,9 +46,11 @@ HWND win_hndl = NULL;
 UINT const WM_USR_LOG = WM_APP + 1;
 UINT const WM_USR_TOGGLE_CONNECT = WM_APP + 2;
 UINT const WM_USR_LOAD_CONFIG = WM_APP + 3;
+UINT const WM_USR_TOGGLE_MULTICAST = WM_APP + 4;
 
 HANDLE comm_thread;
 wstring remote = L"localhost:30501";
+wstring remote_multicast = L"239.80.123.4:30501";
 wstring config_file_path;
 
 // Mutex/cv protects following vars
@@ -120,6 +122,10 @@ void log(wstring const& msg)
 void toggle_want_connect()
 {
 	PostMessage(win_hndl, WM_USR_TOGGLE_CONNECT, (WPARAM) NULL, (LPARAM) NULL);
+}
+
+void toggle_multicast() {
+	PostMessage(win_hndl, WM_USR_TOGGLE_MULTICAST, (WPARAM) NULL, (LPARAM) NULL);
 }
 
 void save_config(path const& filepath, wstring const& remote, bool connect)
@@ -242,6 +248,12 @@ INT_PTR CALLBACK DialogProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
 
 			break;
 		}
+		case IDC_MULTI_BOX:
+		{
+			bool const checked = IsDlgButtonChecked(hWnd, IDC_MULTI_BOX);
+			toggle_multicast();
+			break;
+		}
 		default:
 			return false;
 		}
@@ -286,6 +298,23 @@ INT_PTR CALLBACK DialogProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
 		save_config(config_file_path, remote, want_connect);
 
 		conn_cv.notify_one();
+		return true;
+	}
+	case WM_USR_TOGGLE_MULTICAST:
+	{
+		lock_guard<mutex> conn_lk{ conn_mut };
+
+		want_connect = false;
+		// TODO wait for disconnect?
+
+		// off -> on
+		//      button set text "set"
+		//      text set saved multicast
+		//
+		// on -> off
+		//      button set text "Connect"
+		//      text set saved unicast
+
 		return true;
 	}
 	case WM_USR_LOAD_CONFIG:
@@ -418,6 +447,31 @@ SOCKET _connect() {
 	}
 
 	freeaddrinfo(result);
+
+	return sock;
+}
+
+SOCKET _connect_multic()
+{
+	SOCKET sock;
+
+	sock = socket(AF_INET, SOCK_DGRAM, 0);
+	// TODO fd < 0
+
+	string remote_ch =
+		wstring_convert<codecvt_utf8_utf16<wchar_t>>{}.to_bytes(remote_multicast);
+
+	auto pos = remote_ch.rfind(":");
+	string port_str = pos == string::npos ? "30501" : remote_ch.substr(pos + 1);
+	u_short port = std::stoul(port_str);
+
+	struct sockaddr_in addr = { 0 };
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = inet_addr(remote_ch.c_str());
+	addr.sin_port = htons(port);
+
+	connect(sock, (struct sockaddr *) &addr, sizeof(addr));
+	// TODO return
 
 	return sock;
 }
