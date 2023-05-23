@@ -1,7 +1,10 @@
 # Textractor TCP-Sender
-[Textractor](https://github.com/Artikash/Textractor) extension that sends sentences over TCP.
-Useful for setups where the clipboard is not enough.
-See [here](https://github.com/45Tatami/native-inserter) for an example of the receiving server side.
+
+[Textractor](https://github.com/Artikash/Textractor) extension that sends
+sentences over TCP. Useful for setups where the clipboard is not enough.
+
+See [here](https://github.com/45Tatami/native-inserter) for an example of the
+receiving server side.
 
 Configuration done at runtime via interface.
 
@@ -9,26 +12,23 @@ Configuration done at runtime via interface.
 
 ## Building
 
-Requires Visual Studio 2019 or meson. Drop into VS, build x86 or x64 depending on which Textractor architecture you use.
-Drop resulting dll into Textractor extension window.
+Requires Visual Studio 2019 or meson. Drop into VS, build x86 or x64 depending
+on which Textractor architecture you use. Drop the resulting dll into
+Textractor extension window.
 
 ### meson
 
-```
-meson setup build
-ninja -Cbuild
-```
+    meson setup build
+    ninja -Cbuild
 
-Project includes example cross-compilation definition files for a mingw32 toolchain under `cross`.
+Project includes example cross-compilation definition files for a mingw32
+toolchain under `cross`.
 
+    # x86/32bit
+    meson setup --cross-file=cross/i686-w64-mingw32.txt build
 
-```
-# x86/32bit
-meson setup --cross-file=cross/i686-w64-mingw32.txt build
-
-# x86_64/64bit
-meson setup --cross-file=cross/x86_64-w64-mingw32.txt build
-```
+    # x86_64/64bit
+    meson setup --cross-file=cross/x86_64-w64-mingw32.txt build
 
 ## Mock Application
 
